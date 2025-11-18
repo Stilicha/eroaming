@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: eroaming
+  datasource:
+    url: jdbc:postgresql://localhost:6543/mydatabase
+    username: myuser
+    password: mypassword
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+server:
+  port: 8080
