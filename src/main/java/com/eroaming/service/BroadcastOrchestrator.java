@@ -16,6 +16,26 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Core service responsible for orchestrating the broadcast of start-charging requests
+ * to all active partners in the eRoaming hub network.
+ *
+ * <p>Key responsibilities:
+ * <ul>
+ *   <li>Retrieves active partners from cache</li>
+ *   <li>Sends concurrent requests to all partners</li>
+ *   <li>Implements 5-second timeout with early termination on first success</li>
+ *   <li>Collects and aggregates partner responses</li>
+ *   <li>Provides comprehensive metrics and logging</li>
+ * </ul>
+ *
+ * <p>Performance characteristics:
+ * <ul>
+ *   <li>Uses bounded thread pool to prevent resource exhaustion</li>
+ *   <li>Implements early termination to minimize response time</li>
+ *   <li>Caches partner configurations for optimal performance</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class BroadcastOrchestrator {
@@ -59,6 +79,12 @@ public class BroadcastOrchestrator {
                 .register(meterRegistry);
     }
 
+    /**
+     * Broadcasts start charging requests to all active partners with early termination on first success.
+     *
+     * @param request The broadcast request containing the UID.
+     * @return A CompletableFuture of BroadcastResponse indicating the result of the broadcast.
+     */
     public CompletableFuture<BroadcastResponse> broadcastStartCharging(BroadcastRequest request) {
         long startTime = System.currentTimeMillis();
         Timer.Sample sample = Timer.start(meterRegistry);
@@ -106,6 +132,9 @@ public class BroadcastOrchestrator {
         }, executorService);
     }
 
+    /**
+     * Gracefully shuts down the executor service on application termination.
+     */
     @PreDestroy
     public void shutdown() {
         executorService.shutdown();
@@ -122,6 +151,14 @@ public class BroadcastOrchestrator {
         }
     }
 
+    /**
+     * Executes the broadcast with early termination upon first successful response.
+     *
+     * @param partners  List of active partners to send requests to.
+     * @param uid       The unique identifier for the charging session.
+     * @param startTime The start time of the broadcast for timing calculations.
+     * @return A BroadcastResponse summarizing the results of the broadcast.
+     */
     private BroadcastResponse executeBroadcastWithEarlyTermination(List<Partner> partners, String uid, long startTime) {
         AtomicReference<PartnerResponse> firstSuccess = new AtomicReference<>();
         List<PartnerResponse> collectedResponses = new ArrayList<>();
@@ -130,7 +167,6 @@ public class BroadcastOrchestrator {
         ExecutorCompletionService<PartnerResponse> completionService =
                 new ExecutorCompletionService<>(executorService);
 
-        // Submit all requests
         for (Partner partner : partners) {
             CompletableFuture<PartnerResponse> future = partnerHttpClient
                     .sendStartChargingRequest(partner, uid);
@@ -161,7 +197,7 @@ public class BroadcastOrchestrator {
 
                     if (response.isSuccess() && firstSuccess.compareAndSet(null, response)) {
                         earlyTerminationCounter.increment();
-                        log.info("🎯 Early termination - First success from partner: {}, UID: {}",
+                        log.info("Early termination - First success from partner: {}, UID: {}",
                                 response.getPartnerId(), uid);
                         break;
                     }
@@ -181,6 +217,15 @@ public class BroadcastOrchestrator {
         return buildBroadcastResponse(collectedResponses, firstSuccess.get(), uid, totalTime);
     }
 
+    /**
+     * Builds the final BroadcastResponse based on collected partner responses.
+     *
+     * @param responses       List of PartnerResponses received.
+     * @param successResponse The first successful PartnerResponse, if any.
+     * @param uid             The unique identifier for the charging session.
+     * @param totalTime       The total time taken for the broadcast.
+     * @return A BroadcastResponse summarizing the results.
+     */
     private BroadcastResponse buildBroadcastResponse(
             List<PartnerResponse> responses,
             PartnerResponse successResponse,

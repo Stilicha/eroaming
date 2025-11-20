@@ -11,7 +11,7 @@ public class WebClientConfig {
 
     @Bean
     public MeterRegistry meterRegistry() {
-        return new SimpleMeterRegistry(); // Or use injected one
+        return new SimpleMeterRegistry();
     }
     @Bean
     public WebClient webClient() {

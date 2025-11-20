@@ -21,6 +21,46 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * HTTP client service for communicating with partner REST APIs during broadcast operations.
+ *
+ * <p>This service handles all HTTP communication with partner systems, providing:
+ * <ul>
+ *   <li><b>Multi-format Support:</b> JSON, XML, and form-data request bodies</li>
+ *   <li><b>Authentication Methods:</b> API Key, Bearer token, Basic auth, OAuth2, and no auth</li>
+ *   <li><b>Dynamic Configuration:</b> Per-partner timeouts, headers, and success patterns</li>
+ *   <li><b>Error Resilience:</b> Graceful handling of timeouts, network errors, and malformed responses</li>
+ *   <li><b>Observability:</b> Detailed metrics for success rates, errors, and response times</li>
+ * </ul>
+ *
+ * <p><b>Request Processing:</b>
+ * For each partner, the client:
+ * <ol>
+ *   <li>Constructs appropriate request body based on partner's preferred format</li>
+ *   <li>Configures authentication headers according to partner's auth type</li>
+ *   <li>Applies partner-specific custom headers</li>
+ *   <li>Sends non-blocking HTTP request with partner-specific timeout</li>
+ *   <li>Parses response using partner-specific field mapping rules</li>
+ *   <li>Determines success using partner-specific status patterns</li>
+ * </ol>
+ *
+ * <p><b>Response Processing:</b>
+ * The client extracts status and message from partner responses using configurable JSON paths,
+ * supporting nested field structures. Success is determined by matching against configurable
+ * success patterns (e.g., "success", "approved", "ok").
+ *
+ * <p><b>Technical Implementation:</b>
+ * <ul>
+ *   <li>Uses Spring WebClient for non-blocking HTTP requests</li>
+ *   <li>Supports per-partner timeouts (1-30 seconds)</li>
+ *   <li>Automatically cancels requests on early termination</li>
+ *   <li>Provides detailed metrics for monitoring partner health</li>
+ * </ul>
+ *
+ * @see Partner
+ * @see PartnerResponse
+ * @see WebClient
+ */
 @Slf4j
 @Service
 public class PartnerHttpClient {
@@ -55,6 +95,13 @@ public class PartnerHttpClient {
                 .register(meterRegistry);
     }
 
+    /**
+     * Sends a start charging request to the specified partner.
+     *
+     * @param partner The partner to send the request to.
+     * @param uid     The UID for the start charging request.
+     * @return A CompletableFuture containing the PartnerResponse.
+     */
     public CompletableFuture<PartnerResponse> sendStartChargingRequest(Partner partner, String uid) {
         long startTime = System.currentTimeMillis();
         Timer.Sample sample = Timer.start(meterRegistry);
@@ -107,6 +154,12 @@ public class PartnerHttpClient {
                 .toFuture();
     }
 
+    /**
+     * Configures HTTP headers based on the partner's authentication type and custom headers.
+     *
+     * @param headers The HttpHeaders to configure.
+     * @param partner The partner whose configuration is used.
+     */
     private void configureHeaders(HttpHeaders headers, Partner partner) {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
@@ -128,6 +181,13 @@ public class PartnerHttpClient {
         }
     }
 
+    /**
+     * Creates the request body based on the partner's specified format.
+     *
+     * @param partner The partner whose configuration is used.
+     * @param uid     The UID for the start charging request.
+     * @return The request body in the appropriate format.
+     */
     private Object createRequestBody(Partner partner, String uid) {
         switch (partner.getRequestFormat().toUpperCase()) {
             case "JSON":
@@ -164,6 +224,14 @@ public class PartnerHttpClient {
         }
     }
 
+    /**
+     * Creates a PartnerResponse for a successful HTTP response.
+     *
+     * @param partner   The partner whose configuration is used.
+     * @param response  The response body as a Map.
+     * @param startTime The start time of the request in milliseconds.
+     * @return A PartnerResponse representing the result.
+     */
     private PartnerResponse createSuccessResponse(Partner partner, Map<String, Object> response, long startTime) {
         long responseTime = System.currentTimeMillis() - startTime;
 
@@ -214,7 +282,7 @@ public class PartnerHttpClient {
                 if (current == null) return "N/A";
             }
 
-            return current != null ? String.valueOf(current) : "N/A";
+            return String.valueOf(current);
         } catch (Exception e) {
             log.warn("Failed to extract field '{}' from response: {}", path, e.getMessage());
             return "EXTRACTION_ERROR";
