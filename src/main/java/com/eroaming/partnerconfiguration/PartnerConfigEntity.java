@@ -36,19 +36,19 @@ public class PartnerConfigEntity {
     private String startChargingEndpoint;
 
     @Builder.Default
-    private String requestFormat = "JSON"; // JSON, XML, FORM_DATA
+    private String requestFormat = "JSON";
 
     @Builder.Default
-    private String successStatusPattern = "success"; // "success", "ok", "approved", etc.
+    private String successStatusPattern = "success";
 
     @Builder.Default
-    private String uidFieldName = "uid"; // "userId", "customerId", etc.
+    private String uidFieldName = "uid";
 
     @Builder.Default
-    private String responseStatusPath = "status"; // "result.status", "data.status", etc.
+    private String responseStatusPath = "status";
 
     @Builder.Default
-    private String responseMessagePath = "message"; // "error.message", "data.message", etc.
+    private String responseMessagePath = "message";
 
     @Column(nullable = false)
     private String authenticationType;

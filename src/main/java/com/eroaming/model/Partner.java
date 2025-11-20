@@ -20,7 +20,6 @@ public class Partner {
     @Builder.Default private int timeoutMs = 5000;
     @Builder.Default private String httpMethod = "POST";
 
-    // NEW: Dynamic configuration
     @Builder.Default private String requestFormat = "JSON";
     @Builder.Default private String successStatusPattern = "success";
     @Builder.Default private String uidFieldName = "uid";

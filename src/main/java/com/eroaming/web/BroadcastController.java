@@ -23,22 +23,22 @@ public class BroadcastController {
     public CompletableFuture<ResponseEntity<BroadcastResponse>> startCharging(
             @Valid @RequestBody BroadcastRequest request) {
 
-        log.info("📨 Received start-charging request for UID: {}", request.getUid());
+        log.info("Received start-charging request for UID: {}", request.getUid());
 
         return broadcastOrchestrator.broadcastStartCharging(request)
                 .thenApply(response -> {
                     if (response.isSuccess()) {
-                        log.info("✅ Broadcast successful for UID: {} - Partner: {}",
+                        log.info("Broadcast successful for UID: {} - Partner: {}",
                                 request.getUid(), response.getRespondingPartner());
                         return ResponseEntity.ok(response);
                     } else {
-                        log.warn("❌ Broadcast failed for UID: {} - Reason: {}",
+                        log.warn("Broadcast failed for UID: {} - Reason: {}",
                                 request.getUid(), response.getMessage());
                         return ResponseEntity.badRequest().body(response);
                     }
                 })
                 .exceptionally(throwable -> {
-                    log.error("💥 Broadcast error for UID: {}", request.getUid(), throwable);
+                    log.error("Broadcast error for UID: {}", request.getUid(), throwable);
                     return ResponseEntity.internalServerError()
                             .body(BroadcastResponse.builder()
                                     .success(false)
@@ -49,6 +49,6 @@ public class BroadcastController {
 
     @GetMapping("/health")
     public ResponseEntity<String> health() {
-        return ResponseEntity.ok("Broadcast Service is healthy 🚀");
+        return ResponseEntity.ok("Broadcast Service is healthy");
     }
 }

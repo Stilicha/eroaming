@@ -136,7 +136,7 @@ public class BroadcastOrchestrator {
                     .sendStartChargingRequest(partner, uid);
 
             futures.add(future);
-            completionService.submit(() -> future.get());
+            completionService.submit(future::get);
         }
 
         int receivedResponses = 0;
