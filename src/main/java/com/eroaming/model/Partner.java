@@ -1,5 +1,6 @@
 package com.eroaming.model;
 
+import jakarta.persistence.Column;
 import lombok.Builder;
 import lombok.Data;
 
@@ -9,6 +10,7 @@ import java.util.Map;
 @Builder
 public class Partner {
     private String id;
+    @Column(unique = true)
     private String name;
     private String baseUrl;
     private String startChargingEndpoint;

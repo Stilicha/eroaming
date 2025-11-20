@@ -4,8 +4,10 @@ import com.eroaming.model.BroadcastRequest;
 import com.eroaming.model.BroadcastResponse;
 import com.eroaming.model.Partner;
 import com.eroaming.model.PartnerResponse;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -16,21 +18,60 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class BroadcastOrchestrator {
 
     private final PartnerService partnerService;
     private final PartnerHttpClient partnerHttpClient;
+    private final MeterRegistry meterRegistry;
 
-    private final ExecutorService executorService = Executors.newCachedThreadPool();
+    private final ExecutorService executorService = new ThreadPoolExecutor(
+            10,
+            50,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(100),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
+
+    private final Counter broadcastSuccessCounter;
+    private final Counter broadcastFailureCounter;
+    private final Counter earlyTerminationCounter;
+    private final Timer broadcastTimer;
+
+    public BroadcastOrchestrator(PartnerService partnerService, PartnerHttpClient partnerHttpClient, MeterRegistry meterRegistry) {
+        this.partnerService = partnerService;
+        this.partnerHttpClient = partnerHttpClient;
+        this.meterRegistry = meterRegistry;
+
+        this.broadcastSuccessCounter = Counter.builder("broadcast.success")
+                .description("Successful broadcasts")
+                .register(meterRegistry);
+
+        this.broadcastFailureCounter = Counter.builder("broadcast.failure")
+                .description("Failed broadcasts")
+                .register(meterRegistry);
+
+        this.earlyTerminationCounter = Counter.builder("broadcast.early.termination")
+                .description("Broadcasts that terminated early due to success")
+                .register(meterRegistry);
+
+        this.broadcastTimer = Timer.builder("broadcast.duration")
+                .description("Broadcast request duration")
+                .register(meterRegistry);
+    }
 
     public CompletableFuture<BroadcastResponse> broadcastStartCharging(BroadcastRequest request) {
         long startTime = System.currentTimeMillis();
+        Timer.Sample sample = Timer.start(meterRegistry);
+
         List<Partner> activePartners = partnerService.getActivePartners();
 
         log.info("Starting broadcast to {} partners for UID: {}", activePartners.size(), request.getUid());
 
         if (activePartners.isEmpty()) {
+            sample.stop(broadcastTimer);
+            broadcastFailureCounter.increment();
+            log.warn("No active partners available for broadcast - UID: {}", request.getUid());
+
             return CompletableFuture.completedFuture(
                     BroadcastResponse.builder()
                             .success(false)
@@ -40,10 +81,29 @@ public class BroadcastOrchestrator {
             );
         }
 
-        return CompletableFuture.supplyAsync(() ->
-                        executeBroadcastWithEarlyTermination(activePartners, request.getUid(), startTime),
-                executorService
-        );
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                BroadcastResponse response = executeBroadcastWithEarlyTermination(activePartners, request.getUid(), startTime);
+                sample.stop(broadcastTimer);
+
+                if (response.isSuccess()) {
+                    broadcastSuccessCounter.increment();
+                    log.info("Broadcast completed successfully - UID: {}, TotalTime: {}ms",
+                            request.getUid(), response.getTotalTimeMs());
+                } else {
+                    broadcastFailureCounter.increment();
+                    log.warn("Broadcast failed - UID: {}, TotalTime: {}ms",
+                            request.getUid(), response.getTotalTimeMs());
+                }
+
+                return response;
+            } catch (Exception e) {
+                sample.stop(broadcastTimer);
+                broadcastFailureCounter.increment();
+                log.error("Broadcast execution error - UID: {}, Error: {}", request.getUid(), e.getMessage());
+                throw e;
+            }
+        }, executorService);
     }
 
     @PreDestroy
@@ -52,6 +112,9 @@ public class BroadcastOrchestrator {
         try {
             if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
                 executorService.shutdownNow();
+                if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.error("Thread pool did not terminate");
+                }
             }
         } catch (InterruptedException e) {
             executorService.shutdownNow();
@@ -60,12 +123,10 @@ public class BroadcastOrchestrator {
     }
 
     private BroadcastResponse executeBroadcastWithEarlyTermination(List<Partner> partners, String uid, long startTime) {
-
         AtomicReference<PartnerResponse> firstSuccess = new AtomicReference<>();
         List<PartnerResponse> collectedResponses = new ArrayList<>();
         List<CompletableFuture<PartnerResponse>> futures = new ArrayList<>();
 
-        // Create completion service for early termination
         ExecutorCompletionService<PartnerResponse> completionService =
                 new ExecutorCompletionService<>(executorService);
 
@@ -75,8 +136,6 @@ public class BroadcastOrchestrator {
                     .sendStartChargingRequest(partner, uid);
 
             futures.add(future);
-
-            // Also submit to completion service for ordered completion
             completionService.submit(() -> future.get());
         }
 
@@ -92,7 +151,7 @@ public class BroadcastOrchestrator {
                 );
 
                 if (completedFuture == null) {
-                    break; // Timeout reached
+                    break;
                 }
 
                 try {
@@ -100,11 +159,11 @@ public class BroadcastOrchestrator {
                     collectedResponses.add(response);
                     receivedResponses++;
 
-                    // Check if this is the first success
                     if (response.isSuccess() && firstSuccess.compareAndSet(null, response)) {
-                        log.info("🎯 First success received from partner: {} - Stopping early",
-                                response.getPartnerId());
-                        break; // Exit loop on first success
+                        earlyTerminationCounter.increment();
+                        log.info("🎯 Early termination - First success from partner: {}, UID: {}",
+                                response.getPartnerId(), uid);
+                        break;
                     }
                 } catch (ExecutionException e) {
                     log.warn("Failed to get response from completed future", e);
@@ -127,13 +186,13 @@ public class BroadcastOrchestrator {
             PartnerResponse successResponse,
             String uid, long totalTime) {
 
-        // Calculate statistics
         long successCount = responses.stream().filter(PartnerResponse::isSuccess).count();
         long timeoutCount = responses.stream().filter(PartnerResponse::isTimeout).count();
         long errorCount = responses.stream().filter(r -> !r.isSuccess() && !r.isTimeout()).count();
 
-        log.info("Broadcast summary for UID {}: total={}, success={}, timeouts={}, errors={}, totalTime={}ms",
-                uid, responses.size(), successCount, timeoutCount, errorCount, totalTime);
+        log.info("Broadcast summary - UID: {}, Partners: {}/{}, Success: {}, Timeouts: {}, Errors: {}, TotalTime: {}ms",
+                uid, responses.size(), responses.size() + (successResponse != null ? 0 : 0),
+                successCount, timeoutCount, errorCount, totalTime);
 
         if (successResponse != null) {
             return BroadcastResponse.builder()

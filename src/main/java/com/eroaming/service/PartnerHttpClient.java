@@ -2,6 +2,9 @@ package com.eroaming.service;
 
 import com.eroaming.model.Partner;
 import com.eroaming.model.PartnerResponse;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -21,15 +24,46 @@ import java.util.concurrent.CompletableFuture;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class PartnerHttpClient {
 
     private final WebClient webClient;
+    private final MeterRegistry meterRegistry;
+
+    private final Counter successCounter;
+    private final Counter errorCounter;
+    private final Counter timeoutCounter;
+    private final Timer requestTimer;
+
+    public PartnerHttpClient(WebClient webClient, MeterRegistry meterRegistry) {
+        this.webClient = webClient;
+        this.meterRegistry = meterRegistry;
+
+        // Initialize metrics
+        this.successCounter = Counter.builder("partner.http.success")
+                .description("Successful partner HTTP requests")
+                .register(meterRegistry);
+
+        this.errorCounter = Counter.builder("partner.http.errors")
+                .description("Failed partner HTTP requests")
+                .register(meterRegistry);
+
+        this.timeoutCounter = Counter.builder("partner.http.timeouts")
+                .description("Partner HTTP request timeouts")
+                .register(meterRegistry);
+
+        this.requestTimer = Timer.builder("partner.http.duration")
+                .description("Partner HTTP request duration")
+                .register(meterRegistry);
+    }
 
     public CompletableFuture<PartnerResponse> sendStartChargingRequest(Partner partner, String uid) {
         long startTime = System.currentTimeMillis();
+        Timer.Sample sample = Timer.start(meterRegistry);
 
         String url = partner.getBaseUrl() + partner.getStartChargingEndpoint();
+
+        log.debug("Sending request to partner - Partner: {}, URL: {}, UID: {}",
+                partner.getId(), url, uid);
 
         return webClient.post()
                 .uri(url)
@@ -39,9 +73,38 @@ public class PartnerHttpClient {
                 .retrieve()
                 .bodyToMono(Map.class)
                 .timeout(Duration.ofMillis(partner.getTimeoutMs()))
-                .map(response -> createSuccessResponse(partner, response, startTime))
-                .onErrorResume(throwable ->
-                        Mono.just(createErrorResponse(partner, throwable.getMessage(), startTime)))
+                .map(response -> {
+                    sample.stop(requestTimer);
+                    PartnerResponse partnerResponse = createSuccessResponse(partner, response, startTime);
+
+                    if (partnerResponse.isSuccess()) {
+                        successCounter.increment();
+                        log.info("Partner request successful - Partner: {}, Time: {}ms",
+                                partner.getId(), partnerResponse.getResponseTimeMs());
+                    } else {
+                        errorCounter.increment();
+                        log.warn("Partner request failed - Partner: {}, Status: {}, Time: {}ms",
+                                partner.getId(), partnerResponse.getStatus(), partnerResponse.getResponseTimeMs());
+                    }
+
+                    return partnerResponse;
+                })
+                .onErrorResume(throwable -> {
+                    sample.stop(requestTimer);
+                    PartnerResponse errorResponse = createErrorResponse(partner, throwable.getMessage(), startTime);
+
+                    if (errorResponse.isTimeout()) {
+                        timeoutCounter.increment();
+                        log.warn("Partner request timeout - Partner: {}, Time: {}ms",
+                                partner.getId(), errorResponse.getResponseTimeMs());
+                    } else {
+                        errorCounter.increment();
+                        log.warn("Partner request error - Partner: {}, Error: {}, Time: {}ms",
+                                partner.getId(), throwable.getMessage(), errorResponse.getResponseTimeMs());
+                    }
+
+                    return Mono.just(errorResponse);
+                })
                 .toFuture();
     }
 
@@ -52,9 +115,11 @@ public class PartnerHttpClient {
             case "API_KEY" -> headers.set("X-API-Key", partner.getApiKey());
             case "BEARER" -> headers.setBearerAuth(partner.getApiKey());
             case "BASIC" -> {
-                String[] credentials = partner.getApiKey().split(":");
+                String[] credentials = partner.getApiKey().split(":", 2);
                 if (credentials.length == 2) {
                     headers.setBasicAuth(credentials[0], credentials[1]);
+                } else {
+                    log.warn("Invalid BASIC auth format for partner {}", partner.getId());
                 }
             }
         }
@@ -92,7 +157,6 @@ public class PartnerHttpClient {
                 return formData;
 
             default:
-                // Default to JSON
                 return Map.of(
                         partner.getUidFieldName(), uid,
                         "timestamp", Instant.now().toString(),
@@ -104,7 +168,6 @@ public class PartnerHttpClient {
     private PartnerResponse createSuccessResponse(Partner partner, Map<String, Object> response, long startTime) {
         long responseTime = System.currentTimeMillis() - startTime;
 
-        // CRITICAL FIX: Use partner-specific configuration
         String status = extractFieldValue(partner.getResponseStatusPath(), response);
         String message = extractFieldValue(partner.getResponseMessagePath(), response);
         boolean success = isSuccessResponse(partner, status);
@@ -125,7 +188,6 @@ public class PartnerHttpClient {
     private boolean isSuccessResponse(Partner partner, String actualStatus) {
         if (actualStatus == null) return false;
 
-        // Support multiple success patterns (comma-separated)
         String[] successPatterns = partner.getSuccessStatusPattern().split(",");
         for (String pattern : successPatterns) {
             if (pattern.trim().equalsIgnoreCase(actualStatus.trim())) {
@@ -135,9 +197,8 @@ public class PartnerHttpClient {
         return false;
     }
 
-    // Enhanced field extraction for nested paths
     private String extractFieldValue(String path, Map<String, Object> response) {
-        if (path == null || path.isEmpty()) {
+        if (path == null || path.isEmpty() || response == null) {
             return "N/A";
         }
 
@@ -164,9 +225,6 @@ public class PartnerHttpClient {
     private PartnerResponse createErrorResponse(Partner partner, String error, long startTime) {
         long responseTime = System.currentTimeMillis() - startTime;
         boolean timeout = error.toLowerCase().contains("timeout");
-
-        log.warn("Error from partner {}: {}, time={}ms",
-                partner.getId(), error, responseTime);
 
         return PartnerResponse.builder()
                 .partnerId(partner.getId())

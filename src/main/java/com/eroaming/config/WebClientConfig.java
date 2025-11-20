@@ -1,5 +1,7 @@
 package com.eroaming.config;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -7,6 +9,10 @@ import org.springframework.web.reactive.function.client.WebClient;
 @Configuration
 public class WebClientConfig {
 
+    @Bean
+    public MeterRegistry meterRegistry() {
+        return new SimpleMeterRegistry(); // Or use injected one
+    }
     @Bean
     public WebClient webClient() {
         return WebClient.builder()

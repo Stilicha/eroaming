@@ -21,54 +21,71 @@ import java.util.Optional;
 public class PartnerService {
 
     private final PartnerConfigRepository partnerRepository;
-
-    private final LoadingCache<String, Partner> cache = Caffeine.newBuilder()
-            .expireAfterWrite(Duration.ofMinutes(30))
-            .maximumSize(100) // Can store up to 100 partners
-            .build(this::loadPartnerFromDb);
+    private LoadingCache<String, Partner> cache;
 
     @PostConstruct
     public void init() {
+        this.cache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofMinutes(30))
+                .maximumSize(100)
+                .build(this::loadPartnerFromDb);
         preloadCache();
     }
 
     public List<Partner> getActivePartners() {
-        // Get all cached values (all partners in cache)
+        int cacheSize = cache.asMap().size();
+        log.debug("Retrieving {} active partners from cache", cacheSize);
         return List.copyOf(cache.asMap().values());
     }
 
     public Optional<Partner> getPartner(String partnerId) {
         try {
-            return Optional.of(cache.get(partnerId));
+            Partner partner = cache.get(partnerId);
+            log.debug("Cache hit - Partner: {}", partnerId);
+            return Optional.of(partner);
         } catch (Exception e) {
-            return Optional.empty(); // Partner not found
+            log.debug("Cache miss - Partner: {}", partnerId);
+            return Optional.empty();
         }
     }
 
     @Transactional
     public PartnerConfigEntity createPartner(PartnerConfigEntity partner) {
+        log.info("Creating new partner - ID: {}, Name: {}", partner.getPartnerId(), partner.getName());
+
         PartnerConfigEntity saved = partnerRepository.save(partner);
         refreshCache();
+
+        log.info("Partner created successfully - ID: {}", saved.getPartnerId());
         return saved;
     }
 
     @Transactional
     public PartnerConfigEntity updatePartner(PartnerConfigEntity partner) {
+        log.info("Updating partner - ID: {}", partner.getPartnerId());
+
         PartnerConfigEntity saved = partnerRepository.save(partner);
-        refreshCache();
+        refreshPartner(partner.getPartnerId());
+
+        log.info("Partner updated successfully - ID: {}", saved.getPartnerId());
         return saved;
     }
 
     @Transactional
     public void disablePartner(String partnerId) {
+        log.info("Disabling partner - ID: {}", partnerId);
+
         partnerRepository.updateEnabledStatus(partnerId, false);
-        refreshCache();
+        refreshPartner(partnerId);
+
+        log.info("Partner disabled successfully - ID: {}", partnerId);
     }
 
     public void refreshCache() {
+        log.info("Refreshing entire partner cache");
         cache.invalidateAll();
         preloadCache();
-        log.info("Partners cache refreshed");
+        log.info("Partner cache refreshed");
     }
 
     private void preloadCache() {
@@ -83,7 +100,15 @@ public class PartnerService {
     private Partner loadPartnerFromDb(String partnerId) {
         return partnerRepository.findByPartnerIdAndEnabledTrue(partnerId)
                 .map(this::toPartner)
-                .orElseThrow(() -> new RuntimeException("Partner not found: " + partnerId));
+                .orElseThrow(() -> {
+                    log.warn("Partner not found in database - Partner: {}", partnerId);
+                    return new RuntimeException("Partner not found: " + partnerId);
+                });
+    }
+
+    public void refreshPartner(String partnerId) {
+        log.debug("Refreshing single partner in cache - Partner: {}", partnerId);
+        cache.invalidate(partnerId);
     }
 
     private Partner toPartner(PartnerConfigEntity entity) {
