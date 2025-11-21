@@ -2,6 +2,7 @@ package com.eroaming.service;
 
 import com.eroaming.model.Partner;
 import com.eroaming.model.PartnerResponse;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -14,70 +15,32 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
-/**
- * HTTP client service for communicating with partner REST APIs during broadcast operations.
- *
- * <p>This service handles all HTTP communication with partner systems, providing:
- * <ul>
- *   <li><b>Multi-format Support:</b> JSON, XML, and form-data request bodies</li>
- *   <li><b>Authentication Methods:</b> API Key, Bearer token, Basic auth, OAuth2, and no auth</li>
- *   <li><b>Dynamic Configuration:</b> Per-partner timeouts, headers, and success patterns</li>
- *   <li><b>Error Resilience:</b> Graceful handling of timeouts, network errors, and malformed responses</li>
- *   <li><b>Observability:</b> Detailed metrics for success rates, errors, and response times</li>
- * </ul>
- *
- * <p><b>Request Processing:</b>
- * For each partner, the client:
- * <ol>
- *   <li>Constructs appropriate request body based on partner's preferred format</li>
- *   <li>Configures authentication headers according to partner's auth type</li>
- *   <li>Applies partner-specific custom headers</li>
- *   <li>Sends non-blocking HTTP request with partner-specific timeout</li>
- *   <li>Parses response using partner-specific field mapping rules</li>
- *   <li>Determines success using partner-specific status patterns</li>
- * </ol>
- *
- * <p><b>Response Processing:</b>
- * The client extracts status and message from partner responses using configurable JSON paths,
- * supporting nested field structures. Success is determined by matching against configurable
- * success patterns (e.g., "success", "approved", "ok").
- *
- * <p><b>Technical Implementation:</b>
- * <ul>
- *   <li>Uses Spring WebClient for non-blocking HTTP requests</li>
- *   <li>Supports per-partner timeouts (1-30 seconds)</li>
- *   <li>Automatically cancels requests on early termination</li>
- *   <li>Provides detailed metrics for monitoring partner health</li>
- * </ul>
- *
- * @see Partner
- * @see PartnerResponse
- * @see WebClient
- */
 @Slf4j
 @Service
 public class PartnerHttpClient {
 
     private final WebClient webClient;
     private final MeterRegistry meterRegistry;
-
+    private final CircuitBreakerService circuitBreakerService;
     private final Counter successCounter;
     private final Counter errorCounter;
     private final Counter timeoutCounter;
     private final Timer requestTimer;
+    private final Counter circuitBreakerOpenCounter;
+    private final Counter circuitBreakerSuccessCounter;
+    private final Counter circuitBreakerFailureCounter;
 
-    public PartnerHttpClient(WebClient webClient, MeterRegistry meterRegistry) {
+    public PartnerHttpClient(WebClient webClient, MeterRegistry meterRegistry, CircuitBreakerService circuitBreakerService) {
         this.webClient = webClient;
         this.meterRegistry = meterRegistry;
+        this.circuitBreakerService = circuitBreakerService;
 
-        // Initialize metrics
         this.successCounter = Counter.builder("partner.http.success")
                 .description("Successful partner HTTP requests")
                 .register(meterRegistry);
@@ -93,23 +56,39 @@ public class PartnerHttpClient {
         this.requestTimer = Timer.builder("partner.http.duration")
                 .description("Partner HTTP request duration")
                 .register(meterRegistry);
+
+        this.circuitBreakerOpenCounter = Counter.builder("partner.circuitbreaker.open")
+                .description("Circuit breaker opened events")
+                .register(meterRegistry);
+
+        this.circuitBreakerSuccessCounter = Counter.builder("partner.circuitbreaker.success")
+                .description("Circuit breaker successful calls")
+                .register(meterRegistry);
+
+        this.circuitBreakerFailureCounter = Counter.builder("partner.circuitbreaker.failure")
+                .description("Circuit breaker failed calls")
+                .register(meterRegistry);
     }
 
     /**
-     * Sends a start charging request to the specified partner.
-     *
-     * @param partner The partner to send the request to.
-     * @param uid     The UID for the start charging request.
-     * @return A CompletableFuture containing the PartnerResponse.
+     * Sends a start charging request to the specified partner with circuit breaker protection.
      */
     public CompletableFuture<PartnerResponse> sendStartChargingRequest(Partner partner, String uid) {
+        CircuitBreaker circuitBreaker = circuitBreakerService.getCircuitBreaker(partner.getId());
+
+        if (!circuitBreaker.tryAcquirePermission()) {
+            circuitBreakerOpenCounter.increment();
+            log.warn("Circuit breaker OPEN for partner {} - returning immediate fallback", partner.getId());
+            return CompletableFuture.completedFuture(createCircuitBreakerFallback(partner));
+        }
+
         long startTime = System.currentTimeMillis();
         Timer.Sample sample = Timer.start(meterRegistry);
 
         String url = partner.getBaseUrl() + partner.getStartChargingEndpoint();
 
-        log.debug("Sending request to partner - Partner: {}, URL: {}, UID: {}",
-                partner.getId(), url, uid);
+        log.debug("Sending request to partner - Partner: {}, URL: {}, UID: {}, CircuitBreaker: {}",
+                partner.getId(), url, uid, circuitBreaker.getState());
 
         return webClient.post()
                 .uri(url)
@@ -118,35 +97,50 @@ public class PartnerHttpClient {
                 .accept(MediaType.APPLICATION_JSON)
                 .retrieve()
                 .bodyToMono(Map.class)
-                .timeout(Duration.ofMillis(partner.getTimeoutMs()))
+                .timeout(java.time.Duration.ofMillis(partner.getTimeoutMs()))
                 .map(response -> {
                     sample.stop(requestTimer);
                     PartnerResponse partnerResponse = createSuccessResponse(partner, response, startTime);
 
+                    if (isTechnicalSuccess(partnerResponse)) {
+                        circuitBreaker.onSuccess(partnerResponse.getResponseTimeMs(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                        circuitBreakerSuccessCounter.increment();
+                    } else {
+                        circuitBreaker.onSuccess(partnerResponse.getResponseTimeMs(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                    }
+
                     if (partnerResponse.isSuccess()) {
                         successCounter.increment();
-                        log.info("Partner request successful - Partner: {}, Time: {}ms",
-                                partner.getId(), partnerResponse.getResponseTimeMs());
+                        log.info("Partner request successful - Partner: {}, Time: {}ms, CircuitBreaker: {}",
+                                partner.getId(), partnerResponse.getResponseTimeMs(), circuitBreaker.getState());
                     } else {
                         errorCounter.increment();
-                        log.warn("Partner request failed - Partner: {}, Status: {}, Time: {}ms",
-                                partner.getId(), partnerResponse.getStatus(), partnerResponse.getResponseTimeMs());
+                        log.warn("Partner request business failure - Partner: {}, Status: {}, Time: {}ms, CircuitBreaker: {}",
+                                partner.getId(), partnerResponse.getStatus(), partnerResponse.getResponseTimeMs(),
+                                circuitBreaker.getState());
                     }
 
                     return partnerResponse;
                 })
                 .onErrorResume(throwable -> {
                     sample.stop(requestTimer);
+
+                    long responseTime = System.currentTimeMillis() - startTime;
+
+                    circuitBreaker.onError(responseTime, java.util.concurrent.TimeUnit.MILLISECONDS, throwable);
+                    circuitBreakerFailureCounter.increment();
+
                     PartnerResponse errorResponse = createErrorResponse(partner, throwable.getMessage(), startTime);
 
                     if (errorResponse.isTimeout()) {
                         timeoutCounter.increment();
-                        log.warn("Partner request timeout - Partner: {}, Time: {}ms",
-                                partner.getId(), errorResponse.getResponseTimeMs());
+                        log.warn("Partner request timeout - Partner: {}, Time: {}ms, CircuitBreaker: {}",
+                                partner.getId(), errorResponse.getResponseTimeMs(), circuitBreaker.getState());
                     } else {
                         errorCounter.increment();
-                        log.warn("Partner request error - Partner: {}, Error: {}, Time: {}ms",
-                                partner.getId(), throwable.getMessage(), errorResponse.getResponseTimeMs());
+                        log.warn("Partner request technical error - Partner: {}, Error: {}, Time: {}ms, CircuitBreaker: {}",
+                                partner.getId(), throwable.getMessage(), errorResponse.getResponseTimeMs(),
+                                circuitBreaker.getState());
                     }
 
                     return Mono.just(errorResponse);
@@ -155,11 +149,29 @@ public class PartnerHttpClient {
     }
 
     /**
-     * Configures HTTP headers based on the partner's authentication type and custom headers.
-     *
-     * @param headers The HttpHeaders to configure.
-     * @param partner The partner whose configuration is used.
+     * Determines if the response represents a technical success (HTTP call completed without network errors).
      */
+    private boolean isTechnicalSuccess(PartnerResponse response) {
+        return !response.isTimeout() &&
+                !response.isCircuitBreakerOpen() &&
+                !"NETWORK_ERROR".equals(response.getStatus());
+    }
+
+    /**
+     * Creates a fallback response when circuit breaker is open.
+     */
+    private PartnerResponse createCircuitBreakerFallback(Partner partner) {
+        return PartnerResponse.builder()
+                .partnerId(partner.getId())
+                .success(false)
+                .status("CIRCUIT_BREAKER_OPEN")
+                .message("Service temporarily unavailable - circuit breaker open")
+                .responseTimeMs(0)
+                .timeout(false)
+                .circuitBreakerOpen(true)
+                .build();
+    }
+
     private void configureHeaders(HttpHeaders headers, Partner partner) {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
@@ -181,13 +193,6 @@ public class PartnerHttpClient {
         }
     }
 
-    /**
-     * Creates the request body based on the partner's specified format.
-     *
-     * @param partner The partner whose configuration is used.
-     * @param uid     The UID for the start charging request.
-     * @return The request body in the appropriate format.
-     */
     private Object createRequestBody(Partner partner, String uid) {
         switch (partner.getRequestFormat().toUpperCase()) {
             case "JSON":
@@ -224,14 +229,6 @@ public class PartnerHttpClient {
         }
     }
 
-    /**
-     * Creates a PartnerResponse for a successful HTTP response.
-     *
-     * @param partner   The partner whose configuration is used.
-     * @param response  The response body as a Map.
-     * @param startTime The start time of the request in milliseconds.
-     * @return A PartnerResponse representing the result.
-     */
     private PartnerResponse createSuccessResponse(Partner partner, Map<String, Object> response, long startTime) {
         long responseTime = System.currentTimeMillis() - startTime;
 
@@ -249,6 +246,22 @@ public class PartnerHttpClient {
                 .message(message)
                 .responseTimeMs(responseTime)
                 .timeout(false)
+                .circuitBreakerOpen(false)
+                .build();
+    }
+
+    private PartnerResponse createErrorResponse(Partner partner, String error, long startTime) {
+        long responseTime = System.currentTimeMillis() - startTime;
+        boolean timeout = error.toLowerCase().contains("timeout");
+
+        return PartnerResponse.builder()
+                .partnerId(partner.getId())
+                .success(false)
+                .status("ERROR")
+                .message(error)
+                .responseTimeMs(responseTime)
+                .timeout(timeout)
+                .circuitBreakerOpen(false)
                 .build();
     }
 
@@ -287,19 +300,5 @@ public class PartnerHttpClient {
             log.warn("Failed to extract field '{}' from response: {}", path, e.getMessage());
             return "EXTRACTION_ERROR";
         }
-    }
-
-    private PartnerResponse createErrorResponse(Partner partner, String error, long startTime) {
-        long responseTime = System.currentTimeMillis() - startTime;
-        boolean timeout = error.toLowerCase().contains("timeout");
-
-        return PartnerResponse.builder()
-                .partnerId(partner.getId())
-                .success(false)
-                .status("ERROR")
-                .message(error)
-                .responseTimeMs(responseTime)
-                .timeout(timeout)
-                .build();
     }
 }

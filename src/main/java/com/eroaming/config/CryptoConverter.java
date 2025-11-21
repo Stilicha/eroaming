@@ -2,7 +2,6 @@ package com.eroaming.config;
 
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 
@@ -41,15 +40,19 @@ import java.util.Base64;
 public class CryptoConverter implements AttributeConverter<String, String> {
     private static final String ALGORITHM = "AES/GCM/NoPadding";
     private final SecretKeySpec keySpec;
-    private final Cipher cipher;
 
     public CryptoConverter(@Value("${app.encryption.key}") String encryptionKey) {
         try {
+            if (encryptionKey == null || encryptionKey.trim().isEmpty()) {
+                throw new IllegalArgumentException("Encryption key cannot be null or empty");
+            }
+
             byte[] key = encryptionKey.getBytes(StandardCharsets.UTF_8);
             MessageDigest sha = MessageDigest.getInstance("SHA-256");
             key = sha.digest(key);
             this.keySpec = new SecretKeySpec(key, "AES");
-            this.cipher = Cipher.getInstance(ALGORITHM);
+
+            log.info("CryptoConverter initialized successfully");
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize crypto converter", e);
         }
@@ -59,13 +62,14 @@ public class CryptoConverter implements AttributeConverter<String, String> {
     public String convertToDatabaseColumn(String attribute) {
         if (attribute == null) return null;
         try {
+            Cipher cipher = Cipher.getInstance(ALGORITHM);
             byte[] iv = new byte[12];
             SecureRandom.getInstanceStrong().nextBytes(iv);
 
             GCMParameterSpec parameterSpec = new GCMParameterSpec(128, iv);
             cipher.init(Cipher.ENCRYPT_MODE, keySpec, parameterSpec);
 
-            byte[] cipherText = cipher.doFinal(attribute.getBytes());
+            byte[] cipherText = cipher.doFinal(attribute.getBytes(StandardCharsets.UTF_8));
             byte[] encrypted = new byte[iv.length + cipherText.length];
             System.arraycopy(iv, 0, encrypted, 0, iv.length);
             System.arraycopy(cipherText, 0, encrypted, iv.length, cipherText.length);
@@ -80,6 +84,7 @@ public class CryptoConverter implements AttributeConverter<String, String> {
     public String convertToEntityAttribute(String dbData) {
         if (dbData == null) return null;
         try {
+            Cipher cipher = Cipher.getInstance(ALGORITHM);
             byte[] decoded = Base64.getDecoder().decode(dbData);
             byte[] iv = Arrays.copyOfRange(decoded, 0, 12);
             byte[] cipherText = Arrays.copyOfRange(decoded, 12, decoded.length);
@@ -88,7 +93,7 @@ public class CryptoConverter implements AttributeConverter<String, String> {
             cipher.init(Cipher.DECRYPT_MODE, keySpec, parameterSpec);
 
             byte[] plainText = cipher.doFinal(cipherText);
-            return new String(plainText);
+            return new String(plainText, StandardCharsets.UTF_8);
         } catch (Exception e) {
             log.error("Decryption failed for data: {}", dbData, e);
             throw new RuntimeException("Decryption failed", e);

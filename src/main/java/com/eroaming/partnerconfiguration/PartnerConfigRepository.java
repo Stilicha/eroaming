@@ -16,7 +16,7 @@ public interface PartnerConfigRepository extends JpaRepository<PartnerConfigEnti
 
     @Modifying
     @Query("UPDATE PartnerConfigEntity p SET p.enabled = :enabled WHERE p.partnerId = :partnerId")
-    int updateEnabledStatus(@Param("partnerId") String partnerId, @Param("enabled") boolean enabled);
+    void updateEnabledStatus(@Param("partnerId") String partnerId, @Param("enabled") boolean enabled);
 
     default List<PartnerConfigEntity> findActivePartners() {
         return findByEnabledTrueAndStatus("ACTIVE");

@@ -12,4 +12,5 @@ public class PartnerResponse {
     private String message;
     private long responseTimeMs;
     private boolean timeout;
+    private boolean circuitBreakerOpen;
 }

@@ -61,7 +61,7 @@ public class PartnerConfigEntity {
     private String status = "ACTIVE";
     private String httpMethod = "POST";
 
-    @ElementCollection
+    @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "partner_custom_headers")
     @MapKeyColumn(name = "header_name")
     @Column(name = "header_value")
