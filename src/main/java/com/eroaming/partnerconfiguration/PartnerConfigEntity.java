@@ -1,6 +1,10 @@
 package com.eroaming.partnerconfiguration;
 
 import com.eroaming.config.CryptoConverter;
+import com.eroaming.model.AuthenticationType;
+import com.eroaming.model.RequestFormat;
+import com.eroaming.model.RequestType;
+import com.eroaming.model.Status;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -36,7 +40,8 @@ public class PartnerConfigEntity {
     private String startChargingEndpoint;
 
     @Builder.Default
-    private String requestFormat = "JSON";
+    @Enumerated(EnumType.STRING)
+    private RequestFormat requestFormat = RequestFormat.JSON;
 
     @Builder.Default
     private String successStatusPattern = "success";
@@ -51,15 +56,18 @@ public class PartnerConfigEntity {
     private String responseMessagePath = "message";
 
     @Column(nullable = false)
-    private String authenticationType;
+    @Enumerated(EnumType.STRING)
+    private AuthenticationType authenticationType;
 
     @Convert(converter = CryptoConverter.class)
     private String apiKey;
 
     private Integer timeoutMs = 5000;
     private Boolean enabled = true;
-    private String status = "ACTIVE";
-    private String httpMethod = "POST";
+    @Enumerated(EnumType.STRING)
+    private Status status = Status.ACTIVE;
+    @Enumerated(EnumType.STRING)
+    private RequestType httpMethod = RequestType.POST;
 
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "partner_custom_headers")

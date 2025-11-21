@@ -175,10 +175,10 @@ public class PartnerHttpClient {
     private void configureHeaders(HttpHeaders headers, Partner partner) {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
-        switch (partner.getAuthenticationType().toUpperCase()) {
-            case "API_KEY" -> headers.set("X-API-Key", partner.getApiKey());
-            case "BEARER" -> headers.setBearerAuth(partner.getApiKey());
-            case "BASIC" -> {
+        switch (partner.getAuthenticationType()) {
+            case API_KEY -> headers.set("X-API-Key", partner.getApiKey());
+            case BEARER -> headers.setBearerAuth(partner.getApiKey());
+            case BASIC -> {
                 String[] credentials = partner.getApiKey().split(":", 2);
                 if (credentials.length == 2) {
                     headers.setBasicAuth(credentials[0], credentials[1]);
@@ -194,15 +194,15 @@ public class PartnerHttpClient {
     }
 
     private Object createRequestBody(Partner partner, String uid) {
-        switch (partner.getRequestFormat().toUpperCase()) {
-            case "JSON":
+        switch (partner.getRequestFormat()) {
+            case JSON:
                 Map<String, Object> jsonBody = new HashMap<>();
                 jsonBody.put(partner.getUidFieldName(), uid);
                 jsonBody.put("timestamp", Instant.now().toString());
                 jsonBody.put("requestId", UUID.randomUUID().toString());
                 return jsonBody;
 
-            case "XML":
+            case XML:
                 return String.format(
                         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                                 "<StartChargingRequest>" +
@@ -213,7 +213,7 @@ public class PartnerHttpClient {
                         partner.getUidFieldName(), uid, Instant.now(), UUID.randomUUID()
                 );
 
-            case "FORM_DATA":
+            case FORM_DATA:
                 MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
                 formData.add(partner.getUidFieldName(), uid);
                 formData.add("timestamp", Instant.now().toString());

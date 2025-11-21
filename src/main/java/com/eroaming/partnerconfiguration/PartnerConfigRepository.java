@@ -1,5 +1,6 @@
 package com.eroaming.partnerconfiguration;
 
+import com.eroaming.model.Status;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -12,14 +13,14 @@ import java.util.Optional;
 @Repository
 public interface PartnerConfigRepository extends JpaRepository<PartnerConfigEntity, String> {
 
-    List<PartnerConfigEntity> findByEnabledTrueAndStatus(String status);
+    List<PartnerConfigEntity> findByEnabledTrueAndStatus(Status status);
 
     @Modifying
     @Query("UPDATE PartnerConfigEntity p SET p.enabled = :enabled WHERE p.partnerId = :partnerId")
     void updateEnabledStatus(@Param("partnerId") String partnerId, @Param("enabled") boolean enabled);
 
     default List<PartnerConfigEntity> findActivePartners() {
-        return findByEnabledTrueAndStatus("ACTIVE");
+        return findByEnabledTrueAndStatus(Status.ACTIVE);
     }
 
     Optional<PartnerConfigEntity> findByPartnerIdAndEnabledTrue(String partnerId);

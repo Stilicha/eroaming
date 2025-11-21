@@ -14,13 +14,13 @@ public class Partner {
     private String name;
     private String baseUrl;
     private String startChargingEndpoint;
-    private String authenticationType;
+    private AuthenticationType authenticationType;
     private String apiKey;
 
     @Builder.Default private int timeoutMs = 5000;
-    @Builder.Default private String httpMethod = "POST";
+    @Builder.Default private RequestType httpMethod = RequestType.POST;
 
-    @Builder.Default private String requestFormat = "JSON";
+    @Builder.Default private RequestFormat requestFormat = RequestFormat.JSON;
     @Builder.Default private String successStatusPattern = "success";
     @Builder.Default private String uidFieldName = "uid";
     @Builder.Default private String responseStatusPath = "status";
